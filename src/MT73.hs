@@ -5,22 +5,21 @@
     
     first iteration of a tool to receive and decode the signal from an
     older wireless dual-probe grill thermometer (Maverick ET-73)
-    
-    also my first real attempt to make use of the 'conduit' library.
-    it doesn't seem all that well suited for this application.
  -}
 module Main where
 
-import Control.Applicative
+import qualified Control.Exception as E
 import Control.Monad
 import Control.Monad.Trans
 import Data.Complex
-import Data.Conduit
+import Data.Enumerator ((=$=), (=$), Iteratee(..), Enumeratee, Step(..), Stream(..))
+import qualified Data.Enumerator.List as EL
 import Data.IORef
 import qualified Data.Vector.Storable as ST
 import qualified Data.Vector.Unboxed as U
 import qualified Data.Vector.Unboxed.Mutable as MU
 import Data.Word
+import Foreign.C.Types
 import Foreign.ForeignPtr
 import Foreign.Marshal
 import Foreign.Ptr
@@ -95,23 +94,45 @@ fir2 = U.fromList
     , -1.50943892e-02,  1.83464766e-02,  1.53808516e-02, -8.83062510e-03
     , -1.30252066e-02,  2.88815026e-03,  1.73750917e-02, -3.94449375e-04]
 
-readSink :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Sink (ST.Vector IQ) IO () -> IO Bool
-readSink rtl bufNum bufLen sink = RTLSDR.readAsync rtl bufNum bufLen callback
-    where
-        callback p_buf len = bufSource p_buf len $$ sink
-        
-        bufSource p_buf len = do
-            --liftIO $ putStrLn $ unwords
-            --    [ "len: "
-            --    ,  show len
-            --    ]
+packBuf :: Ptr CUChar -> Int -> IO (ST.Vector IQ)
+packBuf p_buf len = do
+    let elems = len `div` sizeOf (IQ 0 0)
+    
+    fp_copy <- liftIO (mallocForeignPtrArray elems)
+    liftIO $ withForeignPtr fp_copy $ \p_copy ->
+        copyArray p_copy (castPtr p_buf) elems
+    return $! ST.unsafeFromForeignPtr fp_copy 0 elems
+
+readIter :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Iteratee (ST.Vector IQ) IO a -> IO (Maybe a)
+readIter rtl bufNum bufLen iter = do
+    next <- runIteratee iter
+    
+    case next of
+        Error e       -> E.throw e
+        Yield a _     -> do
+            return (Just a)
+        Continue{}    -> do
+            r_next <- newIORef next
             
-            let elems = len `div` sizeOf (IQ 0 0)
+            ok <- RTLSDR.readAsync rtl bufNum bufLen $ \p_buf len -> do
+                step <- readIORef r_next
+                case step of
+                    Continue k    -> do
+                        chunk <- packBuf p_buf len
+                        runIteratee (k (Chunks [chunk])) >>= writeIORef r_next
+                        
+                    _               -> do
+                        RTLSDR.cancelAsync rtl
+                        writeIORef r_next step
             
-            fp_copy <- liftIO (mallocForeignPtrArray elems)
-            liftIO $ withForeignPtr fp_copy $ \p_copy ->
-                copyArray p_copy (castPtr p_buf) elems
-            yield $! ST.unsafeFromForeignPtr fp_copy 0 elems
+            if ok
+                then do
+                    end <- readIORef r_next
+                    case end of
+                        Error e       -> E.throw e
+                        Yield a _     -> return (Just a)
+                        Continue{}    -> return Nothing
+                else return Nothing
 
 -- given filter tap vectors A and B, this implements a FIR filter
 -- which maps input stream X to output stream Y according to the
@@ -140,8 +161,8 @@ readSink rtl bufNum bufLen sink = RTLSDR.readAsync rtl bufNum bufLen callback
 --
 --  (where out-of-bounds reads of 'a' and 'b' return 0)
 
-lfilter :: (Fractional t, Eq t, U.Unbox t) => U.Vector t -> U.Vector t -> IO (Conduit t IO t)
-lfilter b a = do
+lfilter :: (Fractional t, Eq t, U.Unbox t) => U.Vector t -> U.Vector t -> Enumeratee t t IO b
+lfilter b a start = do
     let n = max (U.length a) (U.length b)
         
         pad v = U.generate n $ \i ->
@@ -160,58 +181,41 @@ lfilter b a = do
     
     z <- liftIO (MU.replicate (n-1) 0)
     
-    return $ awaitForever $ \x -> do
-            z_0 <- liftIO (MU.read z 0)
-            let y = (b_0 * x + z_0) / a_0
-            yield y
-            
-            liftIO $ do
-                let bx_m_ay = U.zipWith (-) (U.map (* x) b_t)
-                                            (U.map (* y) a_t)
-                
-                sequence_
-                    [ do
-                        z_ip1 <- MU.read z (i + 1)
-                        MU.write z i (z_ip1 + (bx_m_ay U.! i))
-                    | i <- [0 .. n-3]
-                    ]
-                
-                MU.write z (n-2) (bx_m_ay U.! (n-2))
+    flip EL.mapM start $ \x -> do
+        z_0 <- MU.read z 0
+        let y = (b_0 * x + z_0) / a_0
+            bx_m_ay = U.zipWith (-) (U.map (* x) b_t)
+                                    (U.map (* y) a_t)
+        
+        sequence_
+            [ do
+                z_ip1 <- MU.read z (i + 1)
+                MU.write z i (z_ip1 + (bx_m_ay U.! i))
+            | i <- [0 .. n-3]
+            ]
+        
+        MU.write z (n-2) (bx_m_ay U.! (n-2))
+        
+        return y
 
-decimate :: Monad m => Int -> Conduit a m a
-decimate n = await >>= loop
-    where
-        loop Nothing = return ()
-        loop (Just x) = do
-            yield x
-            replicateM_ (n-1) await
-            await >>= loop
+decimate :: Monad m => Int -> Enumeratee a a m b
+decimate n = flip EL.concatMapAccum n $ \i x ->
+    if i == n
+        then (1,     [x])
+        else (i + 1, [ ])
 
-readFiltered :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Sink C IO () -> IO Bool
-readFiltered rtl bufNum bufLen sink = do
-    --filter1Conduit <- lfilter fir (U.singleton 1)
-    --filter2Conduit <- lfilter fir (U.singleton 1)
-    filter1Conduit <- lfilter fir2 (U.singleton 1)
-    filter2Conduit <- lfilter fir2 (U.singleton 1)
-    filter3Conduit <- lfilter fir2 (U.singleton 1)
-    filter4Conduit <- lfilter fir2 (U.singleton 1)
-    
-    readSink rtl bufNum bufLen
-        (  awaitForever (ST.mapM_ (yield . toC))
-       -- =$= filter1Conduit
-       -- =$= decimate 5
-       -- =$= filter2Conduit
-       -- =$= decimate 5
-       =$= filter1Conduit
-       =$= decimate 2
-       =$= filter2Conduit
-       =$= decimate 2
-       =$= filter3Conduit
-       =$= decimate 2
-       =$= filter4Conduit
-       =$= decimate 2
-       =$= sink
+readFiltered :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Iteratee C IO a -> IO (Maybe a)
+readFiltered rtl bufNum bufLen iter = do
+    readIter rtl bufNum bufLen
+        (     EL.concatMap (map toC . ST.toList)
+        =$= firdec
+        =$= firdec
+        =$= firdec
+        =$= firdec
+        =$  iter
         )
+    where
+        firdec = lfilter fir2 (U.singleton 1) =$= decimate 2
 
 db :: C -> Float
 db (a :+ b) = 10 * logBase 10 (a*a + b*b)
@@ -219,87 +223,63 @@ db (a :+ b) = 10 * logBase 10 (a*a + b*b)
 -- all of these could be implemented without the extra IO layer, but in order
 -- to share state between invocations they need to be this way
 
-avgPwr :: IO (Conduit C IO Float)
-avgPwr = do
+avgPwr :: Float -> Enumeratee C Float IO b
+avgPwr alpha = 
+    EL.map db
+    
     -- noise floor:
     -- y[m] = alpha * x[m] + (1 - alpha)*y[m-1]
-    
-    let alpha = 0.1
-    avgConduit <- lfilter
+    =$= lfilter
         (U.fromList [1,   alpha])
         (U.fromList [1, 1-alpha])
-    
-    return (avgConduit =$= awaitForever (yield . db))
 
-indexed :: IO (Conduit a IO (Integer, a))
-indexed = do
-    r_i <- newIORef 0
-    
-    return $ awaitForever $ \a -> do
-        i <- liftIO $ atomicModifyIORef' r_i $ \i -> (i + 1, i)
-        yield (i, a)
-        
+indexed :: Monad m => Enumeratee a (Integer, a) m b
+indexed = flip EL.mapAccum 0 $ \i x -> (i+1,(i,x))
 
-trigger :: (a -> Bool) -> IO (Conduit a IO a)
-trigger p = do
-    r_fired <- newIORef False
-    
-    return $ awaitForever $ \x -> do
-        let fire = p x
-        
-        when fire $ do
-            fired <- liftIO (readIORef r_fired)
-            when (not fired) (yield x)
-        
-        liftIO (writeIORef r_fired fire)
+trigger :: Monad m => (a -> Bool) -> Enumeratee a a m b
+trigger p = flip EL.concatMapAccum False f
+    where
+        f fired x = (fire, if fire && not fired then [x] else [])
+            where fire = p x
 
-trigger_ :: (a -> Bool) -> IO (Conduit a IO Integer)
-trigger_ p = mapOutput fst <$>
-    ((=$=) <$> indexed <*> trigger (p . snd))
+trigger_ :: Monad m => (a -> Bool) -> Enumeratee a Integer m b
+trigger_ p = indexed =$= trigger (p . snd) =$= EL.map fst
 
-diff :: Num a => IO (Conduit a IO a)
-diff = do
-    r_prev <- newIORef undefined
-    
-    return $ do
-        mbFirst <- await
-        case mbFirst of
-            Nothing     -> return ()
-            Just first  -> do
-                liftIO (writeIORef r_prev first)
-                awaitForever $ \next -> do
-                    d <- liftIO (atomicModifyIORef' r_prev $ \prev -> (next, next - prev))
-                    yield d
+diff :: (Num a, Monad m) => Enumeratee a a m b
+diff = flip EL.mapAccum 0 $ \prev x -> (x, x - prev)
 
-triggerIntervals :: (a -> Bool) -> IO (Conduit a IO Integer)
-triggerIntervals p = (=$=) <$> trigger_ p <*> diff
+triggerIntervals :: Monad m => (a -> Bool) -> Enumeratee a Integer m b
+triggerIntervals p = trigger_ p =$= diff
 
-dump :: Show a => Sink a IO ()
-dump = awaitForever (liftIO . print)
+dump :: Show a => Iteratee a IO ()
+dump = EL.mapM_ print
 
-interp :: Sink Integer IO ()
-interp = awaitForever $ \dt ->
-    liftIO $ putChar $
+interp :: Iteratee Integer IO ()
+interp = EL.mapM_ $ \dt ->
+    when (dt > 13) $ putChar $
         if dt > 40 then '\n'
             else if dt > 22 then '1'
                 else '0'
 
+-- supported gains:
+-- [0,9,14,27,37,77,87,125,144,157,166,197,207,229,254,280,297,328,338,364,372,386,402,421,434,439,445,480,496]
+gain        = 229 -- tenths of db
+threshold   = 0
+
 test = do
     mbDev <- RTLSDR.open 0
     case mbDev of
-        Nothing  -> return False
+        Nothing  -> return Nothing
         Just dev -> do
             RTLSDR.setSampleRate dev (round sampling)
             RTLSDR.setCenterFreq dev (round center)
             RTLSDR.setAGCMode dev False
             RTLSDR.setTunerGainMode dev True
-            RTLSDR.setTunerGain dev 0
+            RTLSDR.setTunerGain dev gain
             RTLSDR.resetBuffer dev
             
-            triggerConduit <- triggerIntervals ((> 0) . db)
-            readFiltered dev 0 0 -- (awaitForever (\(a :+ b) -> liftIO (printf "%f\t%f\n" a b)))
-                (triggerConduit =$= interp)
-                --(avgPwrConduit =$= dump)
-                --(mapInput db (Just . (:+ 0)) dump)
+            readFiltered dev 0 0
+                (triggerIntervals ((> threshold) . db) =$ interp)
+                -- (indexedE =$ dumpE)
 
 main = test
