@@ -1,0 +1,25 @@
+name:                   mt73
+version:                0.0.0.1
+stability:              experimental
+
+cabal-version:          >= 1.2
+build-type:             Simple
+
+author:                 James Cook <your email here>
+maintainer:             James Cook <your email here>
+license:                PublicDomain
+homepage:               /dev/null
+
+category:               Unclassified
+synopsis:               I'm too lame to describe my project
+description:            I'm too lame to describe my project
+
+Executable mt73
+  hs-source-dirs:       src
+  main-is:              MT73.hs
+  ghc-options:          -fwarn-unused-imports -O2
+  build-depends:        base >= 3,
+                        conduit,
+                        mtl,
+                        rtlsdr,
+                        vector
