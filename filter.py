@@ -15,8 +15,8 @@ nyq_rate    = 0.5 * sample_rate
 # N, beta     = kaiserord(stop_db, transition/nyq_rate)
 # taps        = firwin(N, cutoff/nyq_rate, window=('kaiser', beta))
 
-N = 32
-taps = remez(N, [0, 0.2, 0.25, 0.5], [1,0])
+N = 128
+taps = remez(N, [0, 0.00078125, 0.005, 0.03, 0.03125, 0.5], [0, 1,0])
 
 #------------------------------------------------
 # Plot the magnitude response of the filter.

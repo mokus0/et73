@@ -17,7 +17,6 @@ import qualified Data.Enumerator.List as EL
 import Data.IORef
 import qualified Data.Vector.Storable as ST
 import qualified Data.Vector.Unboxed as U
-import qualified Data.Vector.Unboxed.Mutable as MU
 import Data.Word
 import Foreign.C.Types
 import Foreign.ForeignPtr
@@ -53,35 +52,38 @@ decimation  = 10
 
 fir :: U.Vector C
 fir = U.fromList
-    [  1.05080393e-04,  5.54269869e-04,  9.53994929e-04,  1.17045281e-03
-    ,  1.09640775e-03,  6.89879748e-04, -1.54156041e-18, -8.30191938e-04
-    , -1.58883043e-03, -2.04531318e-03, -2.01454830e-03, -1.41860547e-03
-    , -3.27235107e-04,  1.03784975e-03,  2.34169350e-03,  3.21311450e-03
-    ,  3.34362859e-03,  2.58333248e-03,  1.00622137e-03, -1.07769200e-03
-    , -3.17417801e-03, -4.71478813e-03, -5.20240438e-03, -4.35694566e-03
-    , -2.22128769e-03,  8.06679668e-04,  4.03405158e-03,  6.62044051e-03
-    ,  7.78434740e-03,  7.02040440e-03,  4.27085055e-03, -4.63153670e-18
-    , -4.85998307e-03, -9.09361752e-03, -1.14847308e-02, -1.11357698e-02
-    , -7.74583821e-03, -1.77108376e-03,  5.58783623e-03,  1.25893241e-02
-    ,  1.73181176e-02,  1.81457514e-02,  1.41835508e-02,  5.61889702e-03
-    , -6.15773605e-03, -1.86873620e-02, -2.88353827e-02, -3.33802514e-02
-    , -2.96860912e-02, -1.63202422e-02,  6.52096285e-03,  3.68819733e-02
-    ,  7.12595828e-02,  1.05132173e-01,  1.33714574e-01,  1.52796023e-01
-    ,  1.59497287e-01,  1.52796023e-01,  1.33714574e-01,  1.05132173e-01
-    ,  7.12595828e-02,  3.68819733e-02,  6.52096285e-03, -1.63202422e-02
-    , -2.96860912e-02, -3.33802514e-02, -2.88353827e-02, -1.86873620e-02
-    , -6.15773605e-03,  5.61889702e-03,  1.41835508e-02,  1.81457514e-02
-    ,  1.73181176e-02,  1.25893241e-02,  5.58783623e-03, -1.77108376e-03
-    , -7.74583821e-03, -1.11357698e-02, -1.14847308e-02, -9.09361752e-03
-    , -4.85998307e-03, -4.63153670e-18,  4.27085055e-03,  7.02040440e-03
-    ,  7.78434740e-03,  6.62044051e-03,  4.03405158e-03,  8.06679668e-04
-    , -2.22128769e-03, -4.35694566e-03, -5.20240438e-03, -4.71478813e-03
-    , -3.17417801e-03, -1.07769200e-03,  1.00622137e-03,  2.58333248e-03
-    ,  3.34362859e-03,  3.21311450e-03,  2.34169350e-03,  1.03784975e-03
-    , -3.27235107e-04, -1.41860547e-03, -2.01454830e-03, -2.04531318e-03
-    , -1.58883043e-03, -8.30191938e-04, -1.54156041e-18,  6.89879748e-04
-    ,  1.09640775e-03,  1.17045281e-03,  9.53994929e-04,  5.54269869e-04
-    ,  1.05080393e-04]
+    [  1.25053104e-01, -8.02281589e-02, -6.00878685e-02, -4.60099803e-02
+    , -3.61592515e-02, -2.92184776e-02, -2.42541458e-02, -2.06114469e-02
+    , -1.78254223e-02, -1.55795556e-02, -1.36566340e-02, -1.19078097e-02
+    , -1.02557173e-02, -8.65549467e-03, -7.07265391e-03, -5.51575049e-03
+    , -4.01603916e-03, -2.59743136e-03, -1.30115122e-03, -1.41122980e-04
+    ,  7.72293092e-04,  1.63790262e-03,  1.87320993e-03,  2.29676345e-03
+    ,  2.10961160e-03,  1.55020849e-03,  8.82047487e-04, -9.05462065e-05
+    , -1.47999681e-03, -3.14528314e-03, -4.93677844e-03, -6.82765854e-03
+    , -8.84539444e-03, -1.09645342e-02, -1.30655872e-02, -1.50176395e-02
+    , -1.67535562e-02, -1.82205586e-02, -1.93625576e-02, -2.01512901e-02
+    , -2.05056450e-02, -2.03672517e-02, -1.96427753e-02, -1.83988678e-02
+    , -1.64960404e-02, -1.41321319e-02, -1.12182346e-02, -7.75549717e-03
+    , -3.88090860e-03,  3.91716686e-04,  5.03877793e-03,  9.93999483e-03
+    ,  1.49845622e-02,  2.00991623e-02,  2.51956351e-02,  3.01586986e-02
+    ,  3.48556395e-02,  3.91863623e-02,  4.31131865e-02,  4.65625914e-02
+    ,  4.94030919e-02,  5.15958396e-02,  5.30954044e-02,  5.38400859e-02
+    ,  5.38400859e-02,  5.30954044e-02,  5.15958396e-02,  4.94030919e-02
+    ,  4.65625914e-02,  4.31131865e-02,  3.91863623e-02,  3.48556395e-02
+    ,  3.01586986e-02,  2.51956351e-02,  2.00991623e-02,  1.49845622e-02
+    ,  9.93999483e-03,  5.03877793e-03,  3.91716686e-04, -3.88090860e-03
+    , -7.75549717e-03, -1.12182346e-02, -1.41321319e-02, -1.64960404e-02
+    , -1.83988678e-02, -1.96427753e-02, -2.03672517e-02, -2.05056450e-02
+    , -2.01512901e-02, -1.93625576e-02, -1.82205586e-02, -1.67535562e-02
+    , -1.50176395e-02, -1.30655872e-02, -1.09645342e-02, -8.84539444e-03
+    , -6.82765854e-03, -4.93677844e-03, -3.14528314e-03, -1.47999681e-03
+    , -9.05462065e-05,  8.82047487e-04,  1.55020849e-03,  2.10961160e-03
+    ,  2.29676345e-03,  1.87320993e-03,  1.63790262e-03,  7.72293092e-04
+    , -1.41122980e-04, -1.30115122e-03, -2.59743136e-03, -4.01603916e-03
+    , -5.51575049e-03, -7.07265391e-03, -8.65549467e-03, -1.02557173e-02
+    , -1.19078097e-02, -1.36566340e-02, -1.55795556e-02, -1.78254223e-02
+    , -2.06114469e-02, -2.42541458e-02, -2.92184776e-02, -3.61592515e-02
+    , -4.60099803e-02, -6.00878685e-02, -8.02281589e-02,  1.25053104e-01]
 
 fir2 :: U.Vector C
 fir2 = U.fromList
@@ -161,42 +163,31 @@ readIter rtl bufNum bufLen iter = do
 --
 --  (where out-of-bounds reads of 'a' and 'b' return 0)
 
-lfilter :: (Fractional t, Eq t, U.Unbox t) => U.Vector t -> U.Vector t -> Enumeratee t t IO b
-lfilter b a start = do
-    let n = max (U.length a) (U.length b)
+lfilter :: (Fractional t, U.Unbox t, Monad m) => U.Vector t -> U.Vector t -> Enumeratee t t m b
+lfilter b' a' = flip EL.mapAccum (U.replicate (n-1) 0) $ \z x ->
+    let z_0 = U.head z
+        z_t = U.tail z
+        
+        y = (b_0 * x + z_0) / a_0
+        
+        z' = U.zipWith3 (\a b z -> b * x + z - a * y) a_t b_t (z_t `U.snoc` 0)
+     in (z', y)
+    where
+        n = max (U.length a') (U.length b')
         
         pad v = U.generate n $ \i ->
             if i < U.length v 
                 then v U.! i
                 else 0
-    
-    a <- return $! pad a
-    b <- return $! pad b
-    
-    let a_0 = U.head a
+        
+        a = pad a'
+        b = pad b'
+        
+        a_0 = U.head a
         a_t = U.tail a
         
         b_0 = U.head b
         b_t = U.tail b
-    
-    z <- liftIO (MU.replicate (n-1) 0)
-    
-    flip EL.mapM start $ \x -> do
-        z_0 <- MU.read z 0
-        let y = (b_0 * x + z_0) / a_0
-            bx_m_ay = U.zipWith (-) (U.map (* x) b_t)
-                                    (U.map (* y) a_t)
-        
-        sequence_
-            [ do
-                z_ip1 <- MU.read z (i + 1)
-                MU.write z i (z_ip1 + (bx_m_ay U.! i))
-            | i <- [0 .. n-3]
-            ]
-        
-        MU.write z (n-2) (bx_m_ay U.! (n-2))
-        
-        return y
 
 decimate :: Monad m => Int -> Enumeratee a a m b
 decimate n = flip EL.concatMapAccum n $ \i x ->
@@ -208,30 +199,36 @@ readFiltered :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Iteratee C IO a -> IO (Mayb
 readFiltered rtl bufNum bufLen iter = do
     readIter rtl bufNum bufLen
         (     EL.concatMap (map toC . ST.toList)
-        =$= firdec
-        =$= firdec
-        =$= firdec
-        =$= firdec
+        =$= lfilter fir (U.singleton 1) =$= decimate 16
+        -- =$= firdec
+        -- =$= firdec
+        -- =$= firdec
+        -- =$= firdec
         =$  iter
         )
     where
-        firdec = lfilter fir2 (U.singleton 1) =$= decimate 2
+        --firdec = lfilter fir2 (U.singleton 1) =$= decimate 2
 
-db :: C -> Float
-db (a :+ b) = 10 * logBase 10 (a*a + b*b)
+magSq :: Num a => Complex a -> a
+magSq (a :+ b) = a*a + b*b
+
+db :: Floating a => a -> a
+db z = (10 / log 10) * log z
 
 -- all of these could be implemented without the extra IO layer, but in order
 -- to share state between invocations they need to be this way
 
-avgPwr :: Float -> Enumeratee C Float IO b
+avgPwr :: (Floating a, U.Unbox a, Monad m) => a -> Enumeratee (Complex a) a m b
 avgPwr alpha = 
-    EL.map db
+    EL.map magSq
     
-    -- noise floor:
+    -- simple exponential decay filter:
     -- y[m] = alpha * x[m] + (1 - alpha)*y[m-1]
     =$= lfilter
-        (U.fromList [1,   alpha])
-        (U.fromList [1, 1-alpha])
+        (U.fromList [1, alpha])
+        (U.fromList [1, alpha - 1])
+    
+    =$= EL.map db
 
 indexed :: Monad m => Enumeratee a (Integer, a) m b
 indexed = flip EL.mapAccum 0 $ \i x -> (i+1,(i,x))
@@ -279,7 +276,8 @@ test = do
             RTLSDR.resetBuffer dev
             
             readFiltered dev 0 0
-                (triggerIntervals ((> threshold) . db) =$ interp)
-                -- (indexedE =$ dumpE)
+                (triggerIntervals ((> threshold) . db . magSq) =$ interp)
+                -- (indexed =$ dump)
+                -- (avgPwr 0.01 =$= decimate 100 =$ dump)
 
 main = test
