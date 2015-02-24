@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {- 
-    mt73
+    et73
     
     first iteration of a tool to receive and decode the signal from an
     older wireless dual-probe grill thermometer (Maverick ET-73)

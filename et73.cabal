@@ -1,4 +1,4 @@
-name:                   mt73
+name:                   et73
 version:                0.0.0.1
 stability:              experimental
 
@@ -14,9 +14,9 @@ category:               Unclassified
 synopsis:               I'm too lame to describe my project
 description:            I'm too lame to describe my project
 
-Executable mt73
+Executable et73
   hs-source-dirs:       src
-  main-is:              MT73.hs
+  main-is:              ET73.hs
   ghc-options:          -fwarn-unused-imports -fwarn-unused-binds -O2
   build-depends:        base >= 3,
                         enumerator,
