@@ -17,7 +17,7 @@ description:            I'm too lame to describe my project
 Executable mt73
   hs-source-dirs:       src
   main-is:              MT73.hs
-  ghc-options:          -fwarn-unused-imports -O2
+  ghc-options:          -fwarn-unused-imports -fwarn-unused-binds -O2
   build-depends:        base >= 3,
                         enumerator,
                         mtl,

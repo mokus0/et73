@@ -3,20 +3,20 @@ from scipy.signal import *
 
 sample_rate = 250e3
 nyq_rate    = 0.5 * sample_rate
+decimation  = 10
+cutoff      = 0.4 / decimation
+transition  = 0.1 / decimation
 
-# cutoff      = 0.08 * sample_rate
-# transition  = 0.02 * sample_rate
-# stop_db     = 40.0
+stop_db     = 50.0
+N, beta     = kaiserord(stop_db, 2 * transition)
+taps        = firwin(N, 2 * cutoff, window=('kaiser', beta))
 
-# cutoff      = 0.2  * sample_rate
-# transition  = 0.05 * sample_rate
-# stop_db     = 40.0
+# N = 128
+# dc_notch = 1./N
+# taps = remez(N, [0, dc_notch, 2*dc_notch, cutoff, cutoff + transition, 0.5], [0, 1,0])
 
-# N, beta     = kaiserord(stop_db, transition/nyq_rate)
-# taps        = firwin(N, cutoff/nyq_rate, window=('kaiser', beta))
-
-N = 128
-taps = remez(N, [0, 0.00078125, 0.005, 0.03, 0.03125, 0.5], [0, 1,0])
+# N = 256
+# taps = remez(N, [0, cutoff, cutoff + transition, 0.5], [1,0])
 
 #------------------------------------------------
 # Plot the magnitude response of the filter.
