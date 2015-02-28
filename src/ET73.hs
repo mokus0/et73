@@ -14,11 +14,13 @@ import qualified Control.Exception as E
 import Control.Monad
 import Control.Monad.Trans
 import Data.Bits
+import Data.Monoid
 import Data.Complex
 import Data.Enumerator ((=$=), (=$), Iteratee(..), Enumeratee, Step(..), Stream(..))
 import qualified Data.Enumerator.List as EL
 import Data.IORef
 import Data.Int
+import Data.List
 import Data.Maybe
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as ST
@@ -30,6 +32,7 @@ import Foreign.Marshal
 import Foreign.Ptr
 import Foreign.Storable
 import qualified RTLSDR
+import Stats
 import System.IO
 import Text.Printf
 
@@ -49,94 +52,14 @@ instance Storable IQ where
         pokeByteOff p 1 q
 
 toC :: IQ -> C
-toC (IQ i q) = (fromIntegral i - 127) :+ (fromIntegral q - 127)
+toC (IQ i q) = (fromIntegral i - 128) :+ (fromIntegral q - 128)
 
 center, sampling :: Fractional a => a
 center      = 433.846e6
 sampling    = 250e3
 
-decimation :: Num a => a
-decimation  = 10
-
 samples :: Fractional a => a -> a
-samples sec = sec * sampling / decimation
-
-fir :: U.Vector C
-fir = U.fromList
-    [ -9.30242857e-05, -1.17815322e-04, -1.37578498e-04, -1.49997562e-04
-    , -1.53044578e-04, -1.45180040e-04, -1.25534707e-04, -9.40566127e-05
-    , -5.16080549e-05,  1.07912788e-18,  5.80447912e-05,  1.19003748e-04
-    ,  1.78739846e-04,  2.32752717e-04,  2.76482123e-04,  3.05645213e-04
-    ,  3.16584811e-04,  3.06603216e-04,  2.74254961e-04,  2.19572921e-04
-    ,  1.44205040e-04,  5.14438518e-05, -5.38624550e-05, -1.65520771e-04
-    , -2.76320131e-04, -3.78460634e-04, -4.64061105e-04, -5.25714807e-04
-    , -5.57056664e-04, -5.53301842e-04, -5.11714582e-04, -4.31968200e-04
-    , -3.16362111e-04, -1.69869564e-04,  7.82714377e-19,  1.83527931e-04
-    ,  3.69293405e-04,  5.44837752e-04,  6.97450551e-04,  8.15030838e-04
-    ,  8.86968277e-04,  9.04983941e-04,  8.63869099e-04,  7.62063428e-04
-    ,  6.02021405e-04,  3.90327023e-04,  1.37531961e-04, -1.42290087e-04
-    , -4.32260934e-04, -7.13655670e-04, -9.67050428e-04, -1.17359360e-03
-    , -1.31632126e-03, -1.38142949e-03, -1.35941396e-03, -1.24599064e-03
-    , -1.04272118e-03, -7.57282113e-04, -4.03337575e-04,  1.43420392e-18
-    ,  4.29109954e-04,  8.57164825e-04,  1.25572705e-03,  1.59655096e-03
-    ,  1.85348094e-03,  2.00432390e-03,  2.03256881e-03,  1.92882907e-03
-    ,  1.69189502e-03,  1.32930360e-03,  8.57359323e-04,  3.00573509e-04
-    , -3.09474052e-04, -9.35808373e-04, -1.53818670e-03, -2.07556482e-03
-    , -2.50875800e-03, -2.80313176e-03, -2.93114631e-03, -2.87457908e-03
-    , -2.62626077e-03, -2.19118422e-03, -1.58687823e-03, -8.42981457e-04
-    ,  2.13591852e-18,  8.92715120e-04,  1.77968160e-03,  2.60255190e-03
-    ,  3.30374986e-03,  3.83026208e-03,  4.13734725e-03,  4.19191909e-03
-    ,  3.97536669e-03,  3.48560017e-03,  2.73814742e-03,  1.76618004e-03
-    ,  6.19407830e-04, -6.38149398e-04, -1.93143266e-03, -3.17850668e-03
-    , -4.29540034e-03, -5.20135619e-03, -5.82418110e-03, -6.10536766e-03
-    , -6.00465313e-03, -5.50370064e-03, -4.60862487e-03, -3.35114201e-03
-    , -1.78819609e-03,  2.73201377e-18,  1.91347801e-03,  3.83745546e-03
-    ,  5.64848575e-03,  7.22151516e-03,  8.43747622e-03,  9.19099681e-03
-    ,  9.39777819e-03,  9.00119280e-03,  7.97767801e-03,  6.34055212e-03
-    ,  4.14195326e-03,  1.47269629e-03, -1.54004727e-03, -4.73722212e-03
-    , -7.93436814e-03, -1.09298407e-02, -1.35144003e-02, -1.54817098e-02
-    , -1.66392106e-02, -1.68188104e-02, -1.58868058e-02, -1.37524863e-02
-    , -1.03749209e-02, -5.76751096e-03,  3.07481851e-18,  6.80223924e-03
-    ,  1.44616829e-02,  2.27547950e-02,  3.14205826e-02,  4.01711885e-02
-    ,  4.87040333e-02,  5.67149260e-02,  6.39115072e-02,  7.00263609e-02
-    ,  7.48291412e-02,  7.81371057e-02,  7.98235219e-02,  7.98235219e-02
-    ,  7.81371057e-02,  7.48291412e-02,  7.00263609e-02,  6.39115072e-02
-    ,  5.67149260e-02,  4.87040333e-02,  4.01711885e-02,  3.14205826e-02
-    ,  2.27547950e-02,  1.44616829e-02,  6.80223924e-03,  3.07481851e-18
-    , -5.76751096e-03, -1.03749209e-02, -1.37524863e-02, -1.58868058e-02
-    , -1.68188104e-02, -1.66392106e-02, -1.54817098e-02, -1.35144003e-02
-    , -1.09298407e-02, -7.93436814e-03, -4.73722212e-03, -1.54004727e-03
-    ,  1.47269629e-03,  4.14195326e-03,  6.34055212e-03,  7.97767801e-03
-    ,  9.00119280e-03,  9.39777819e-03,  9.19099681e-03,  8.43747622e-03
-    ,  7.22151516e-03,  5.64848575e-03,  3.83745546e-03,  1.91347801e-03
-    ,  2.73201377e-18, -1.78819609e-03, -3.35114201e-03, -4.60862487e-03
-    , -5.50370064e-03, -6.00465313e-03, -6.10536766e-03, -5.82418110e-03
-    , -5.20135619e-03, -4.29540034e-03, -3.17850668e-03, -1.93143266e-03
-    , -6.38149398e-04,  6.19407830e-04,  1.76618004e-03,  2.73814742e-03
-    ,  3.48560017e-03,  3.97536669e-03,  4.19191909e-03,  4.13734725e-03
-    ,  3.83026208e-03,  3.30374986e-03,  2.60255190e-03,  1.77968160e-03
-    ,  8.92715120e-04,  2.13591852e-18, -8.42981457e-04, -1.58687823e-03
-    , -2.19118422e-03, -2.62626077e-03, -2.87457908e-03, -2.93114631e-03
-    , -2.80313176e-03, -2.50875800e-03, -2.07556482e-03, -1.53818670e-03
-    , -9.35808373e-04, -3.09474052e-04,  3.00573509e-04,  8.57359323e-04
-    ,  1.32930360e-03,  1.69189502e-03,  1.92882907e-03,  2.03256881e-03
-    ,  2.00432390e-03,  1.85348094e-03,  1.59655096e-03,  1.25572705e-03
-    ,  8.57164825e-04,  4.29109954e-04,  1.43420392e-18, -4.03337575e-04
-    , -7.57282113e-04, -1.04272118e-03, -1.24599064e-03, -1.35941396e-03
-    , -1.38142949e-03, -1.31632126e-03, -1.17359360e-03, -9.67050428e-04
-    , -7.13655670e-04, -4.32260934e-04, -1.42290087e-04,  1.37531961e-04
-    ,  3.90327023e-04,  6.02021405e-04,  7.62063428e-04,  8.63869099e-04
-    ,  9.04983941e-04,  8.86968277e-04,  8.15030838e-04,  6.97450551e-04
-    ,  5.44837752e-04,  3.69293405e-04,  1.83527931e-04,  7.82714377e-19
-    , -1.69869564e-04, -3.16362111e-04, -4.31968200e-04, -5.11714582e-04
-    , -5.53301842e-04, -5.57056664e-04, -5.25714807e-04, -4.64061105e-04
-    , -3.78460634e-04, -2.76320131e-04, -1.65520771e-04, -5.38624550e-05
-    ,  5.14438518e-05,  1.44205040e-04,  2.19572921e-04,  2.74254961e-04
-    ,  3.06603216e-04,  3.16584811e-04,  3.05645213e-04,  2.76482123e-04
-    ,  2.32752717e-04,  1.78739846e-04,  1.19003748e-04,  5.80447912e-05
-    ,  1.07912788e-18, -5.16080549e-05, -9.40566127e-05, -1.25534707e-04
-    , -1.45180040e-04, -1.53044578e-04, -1.49997562e-04, -1.37578498e-04
-    , -1.17815322e-04, -9.30242857e-05]
+samples sec = sec * sampling
 
 packBuf :: Ptr CUChar -> Int -> IO (ST.Vector IQ)
 packBuf p_buf len = do
@@ -241,16 +164,6 @@ dcReject :: (Fractional a, Monad m) => a -> Enumeratee a a m b
 dcReject alpha = flip EL.mapAccum 0 $ \dc x ->
     (lerp dc x alpha, x - dc)
 
-readFiltered :: RTLSDR.RTLSDR -> Word32 -> Word32 -> Iteratee C IO a -> IO (Maybe a)
-readFiltered rtl bufNum bufLen iter = do
-    readIter rtl bufNum bufLen
-        (  EL.concatMap (map toC . ST.toList)
-       =$= dcReject (recip sampling)
-       =$= lfilter fir (U.singleton 1)
-       =$= decimate decimation
-       =$  iter
-        )
-
 magSq :: Num a => Complex a -> a
 magSq (a :+ b) = a*a + b*b
 
@@ -263,67 +176,94 @@ pow = db . magSq
 indexed :: Monad m => Enumeratee a (Integer, a) m b
 indexed = flip EL.mapAccum 0 $ \i x -> (i+1,(i,x))
 
-data Token a = Pulse !Int !a | Delay !Int !a | Idle !a
+data Samples a = Samples
+    { magnitudeStats :: !(Stats a)
+    , phaseStats     :: !(Stats a)
+    }
     deriving (Eq, Ord, Read, Show)
 
-isPulse Pulse{} = True
-isPulse _       = False
+instance (Ord a, Fractional a) => Monoid (Samples a) where
+    mempty  = Samples mempty mempty
+    mappend (Samples xs1 ps1) (Samples xs2 ps2) = 
+        Samples (mappend xs1 xs2) (mappend ps1 ps2)
 
-isDelay Delay{} = True
-isDelay _       = False
+sample       x p = Samples (stats x) (stats p)
+addSample ss x p = mappend ss (sample x p)
 
-isIdle  Idle{}  = True
-isIdle  _       = False
+nSamples     = count . magnitudeStats
+sampleMean   = mean . magnitudeStats
 
-tokenSNR (Pulse _ r) = r
-tokenSNR (Delay _ r) = r
-tokenSNR (Idle    r) = r
+duration   t = fromIntegral (nSamples t) / sampling
+sampleFreq t = sampling * mean (phaseStats t)
 
-tokenize :: (Monad m, Ord a, Num a) => (a -> Bool) -> Int -> Enumeratee a (Token a) m b
-tokenize p timeout = flip EL.concatMapAccum (Idle 0) f
+data TokenizerState = Pulse | Delay | Idle
+
+data Token a = Token {pulseSamples :: !(Samples a), delaySamples :: !(Samples a), idle :: !Bool}
+    deriving (Eq, Ord, Read, Show)
+
+tokenSNR t = sampleMean (pulseSamples t) - sampleMean (delaySamples t)
+
+debounce :: (Monad m, Ord a, Fractional a) => Int -> Enumeratee (Token a) (Token a) m b
+debounce minPulse = EL.concatMapAccum accum Nothing
     where
-        f t@Idle{} x
-            | p x           = (Pulse 1 x,                       [])
-            | otherwise     = (t,                               [])
+        short t = (nSamples (pulseSamples t) < minPulse)
+        extend (Token p0 d0 i0) (Token p1 d1 i1) =
+            Token p0 (mconcat [d0, p1, d1]) (i0 || i1)
         
-        f t@(Delay dt min_x) x
-            | p x           = (Pulse 1 x,                       [t])
-            | dt >= timeout = (Idle min_x,                      [Idle min_x])
-            | otherwise     = (Delay (dt + 1) (min x min_x),    [])
+        accum Nothing t
+            | short t   = (Nothing, [])
+            | idle t    = (Nothing, [t])
+            | otherwise = (Just t, [])
+        accum (Just prev) t
+            | short t   = (Just (extend prev t), [])
+            | idle t    = (Nothing, [prev, t])
+            | otherwise = (Just t, [prev])
         
-        f t@(Pulse dt max_x) x
-            | p x           = (Pulse (dt + 1) (max x max_x),    [])
-            | otherwise     = (Delay 1 x,                       [t])
 
-debounce :: (Monad m, Num a, Ord a) => Int -> Int -> Enumeratee (Token a) (Token a) m b
-debounce np nd = flip EL.concatMapAccum (Idle 0) f
+tokenize :: (Monad m, Ord a, RealFloat a) => a -> a -> a -> Int -> Int -> Enumeratee (Complex a) (Token a) m b
+tokenize alpha thresholdLo thresholdHi minPulse maxDelay = 
+        EL.mapAccum snr (0/0, 0/0)
+    =$= EL.concatMapAccum f (Idle, mempty, mempty)
+    =$= debounce minPulse
     where
-        f Idle{} tok@(Pulse t _)
-            | t < np            = (tok, [])
-        f Idle{} tok@(Delay t _)
-            | t < nd            = (tok, [])
-        f Idle{} t              = (Idle 0, [t])
+        snr (prev, nf) z = 
+            let p       = db (magSq z)
+                nf' | isInfinite nf
+                    || isNaN nf     = p
+                    | z == 0        = nf
+                    | otherwise     = lerp nf p alpha
+                
+             in ((z, nf'), (p - nf, phase (z / prev)))
         
-        f (Pulse t0 p0) (Delay t1 p1)
-            | t < np                    = (Pulse t (max p0 p1), [])
-            where t = t0 + t1
-        f (Pulse t0 p0) (Pulse t1 p1)   = (Pulse t (max p0 p1), [])
-            where t = t0 + t1
+        f t@(Idle, ps, ds) (x, p)
+            | x > thresholdHi           = ((Pulse, sample x p, ds),         [])
+            | otherwise                 = (t,                               [])
         
-        f (Delay t0 p0) (Pulse t1 p1)
-            | t < nd                    = (Delay t (min p0 p1), [])
-            where t = t0 + t1
-        f (Delay t0 p0) (Delay t1 p1)   = (Delay t (min p0 p1), [])
-            where t = t0 + t1
+        f t@(Delay, ps, ds) (x, p)
+            | x > thresholdHi           = ((Pulse, sample x p, mempty),     [Token ps ds False])
+            | nSamples ds > maxDelay    = ((Idle, mempty, mempty),          [Token ps ds True])
+            | otherwise                 = ((Delay, ps, addSample ds x p),   [])
         
-        f acc t = (Idle 0, [acc, t])
+        f t@(Pulse, ps, ds) (x, p)
+            | x > thresholdLo           = ((Pulse, addSample ps x p, ds),   [])
+            | otherwise                 = ((Delay, ps, sample x p),         [])
+
+inRange t0 t1 x = t0 <= x && x <= t1
 
 data Packet a
-    = AssocPulse      a
-    | Packet          a !(Token a) !(U.Vector Word8)
-    | InvalidPacket   a !(Token a) !(U.Vector Word8)
-    | InvalidWaveform   !(V.Vector (Token a))
+    = AssocPulse      !(Token a)
+    | Packet          !(Token a) !(U.Vector Word8)
+    | InvalidPacket   !(Token a) !(U.Vector Word8)
+    | InvalidWaveform  !(V.Vector (Token a))
     deriving (Eq, Ord, Read, Show)
+
+pprPacket (AssocPulse t) = "AssocPulse: " ++ pprToken t
+pprPacket (Packet _ v) = "Packet: " ++ show (U.toList v)
+pprPacket (InvalidPacket _ v) = "InvalidPacket: " ++ show (U.toList v)
+pprPacket (InvalidWaveform v) = "InvalidWaveform:\n" ++ unlines
+    [ "   " ++ pprToken t
+    | t <- V.toList v
+    ]
 
 validWaveform InvalidWaveform{} = False
 validWaveform _                 = True
@@ -332,51 +272,42 @@ validPacket InvalidWaveform{}   = False
 validPacket InvalidPacket{}     = False
 validPacket _                   = True
 
-packetSNR (Packet r _ _)           = r
-packetSNR (InvalidPacket r _ _)    = r
-packetSNR (InvalidWaveform v)
-    = V.minimum (V.map tokenSNR pulses)
-    - V.maximum (V.map tokenSNR rest)
-        where
-            --mean xs = V.sum xs / fromIntegral (V.length xs)
-            (pulses, rest) = V.partition isPulse v
+packetSNR (AssocPulse t)        = tokenSNR t
+packetSNR (Packet        t _)   = tokenSNR t
+packetSNR (InvalidPacket t _)   = tokenSNR t
+packetSNR (InvalidWaveform v)   = V.maximum (V.map tokenSNR v)
+
+summarizeTokens :: (Ord a, Fractional a) => [Token a] -> Token a
+summarizeTokens = foldl' f (Token mempty mempty False)
+    where
+        f (Token ps0 ds0 i0) (Token ps1 ds1 i1) = 
+            Token (mappend ps0 ps1) (mappend ds0 ds1) (i0 || i1)
 
 
 packetize :: (Monad m, Ord a, Fractional a) => Enumeratee (Token a) (Packet a) m b
-packetize = flip EL.concatMapAccum id f
+packetize = EL.concatMapAccum f id
     where
-        inRange t0 t1 x =
-            samples t0 <= fromIntegral x
-            && fromIntegral x <= samples t1
-        
-        packDelim (Idle{})          = True
-        packDelim (Delay dt _)  = inRange 2.8e-3 4.5e-3 dt
-        packDelim _             = False
+        packDelim t = idle t || inRange 2.8e-3 4.5e-3 (duration (delaySamples t))
         
         f p t
             | packDelim t   = (id,       [parsePacket t (p [])])
             | otherwise     = (p . (t:), [])
-        
+
         parsePacket endToken tokens = 
             case validBits of
                 Just bs@(_:_) -> maybe
-                    (InvalidPacket snr endToken  (U.fromList bs))
-                    (Packet        snr endToken . U.fromList)
+                    (InvalidPacket ts  (U.fromList bs))
+                    (Packet        ts . U.fromList)
                     (packBytes bs)
-                _       -> invalid
-            where
-                invalid     = InvalidWaveform (V.fromList tokens `V.snoc` endToken)
-                snr         = packetSNR invalid
+                _       -> InvalidWaveform (V.fromList tokens `V.snoc` endToken)
+             where
+                ts          = summarizeTokens (endToken : tokens)
                 
-                validBits   = pairTokens tokens >>= mapM validBit
+                validBits   = mapM validBit tokens
                 
-                pairTokens (Pulse p _ : Delay d _ : rest) = ((p,d):) <$> pairTokens rest
-                pairTokens [Pulse _ _] = Just []
-                pairTokens _  = Nothing
-                
-                validBit (p, d)
-                    | inRange 1.0e-3 1.4e-3 (p + d) = Just 0
-                    | inRange 2.0e-3 2.4e-3 (p + d) = Just 1
+                validBit t
+                    | inRange 0.8e-3 1.2e-3 (duration (delaySamples t)) = Just 0
+                    | inRange 1.8e-3 2.2e-3 (duration (delaySamples t)) = Just 1
                     | otherwise             = Nothing
                 
                 packByte bits = do
@@ -390,41 +321,100 @@ packetize = flip EL.concatMapAccum id f
                     where
                         (byte,rest) = splitAt 8 bits
 
-clusterMessages :: (Ord a, Fractional a, Monad m) => Enumeratee (Packet a) (Message a, [a]) m b
-clusterMessages = EL.concatMapAccum f []
+{-
+
+-- TODO: see if this version is worth saving...
+-- as it is right now it's too eager to group stuff, blocks up the pipeline
+
+bits :: Monad m => Enumeratee (Token a) (Either (Token a) (Token a, Word8)) m b
+bits =  EL.map recognizeBit
     where
-        endToken (Packet        _ e _)  = e
-        endToken (InvalidPacket _ e _)  = e
-        endToken (InvalidWaveform v)    = V.last v
-        
-        isIdle Idle{}   = True
-        isIdle _        = False
-        
-        f ms p = case interp p of
-            m@UnknownMessage{}  -> ([], summarize ms ++ summarize [m])
-            m1                  -> 
-                case ms of
-                    []              -> ([m1], [])
-                    m0:_
-                        | m0 `eqMessages` m1    -> 
-                            if isIdle (endToken p)
-                                then ([], summarize (ms ++ [m1]))
-                                else (ms ++ [m1], [])
-                        | otherwise             -> ([m1], summarize ms)
-        
-        summarize []        = []
-        summarize ms@(m:_)   = [(m, map messageSNR ms)]
+        recognizeBit t
+            | bitPulse && zeroDelay = Right (t, 0)
+            | bitPulse && oneDelay  = Right (t, 1)
+            | otherwise             = Left t
+            where
+                pulse = duration (pulseSamples t)
+                delay = duration (delaySamples t)
+                
+                bitPulse    = inRange 0.1e-3 0.3e-3 pulse
+                zeroDelay   = inRange 0.8e-3 1.2e-3 delay
+                oneDelay    = inRange 1.8e-3 2.2e-3 delay
 
-
-uniq :: Monad m => (a -> a -> Bool) -> Enumeratee a a m b
-uniq p = EL.concatMapAccum f Nothing
+collectEithers :: Monad m => Enumeratee (Either a b) (Either [a] [b]) m c
+collectEithers = EL.concatMapAccum accum (Left id)
     where
-        f Nothing x = (Just x, [])
-        f mbPrev@(Just prev) x
-            | p prev x  = (mbPrev, [])
-            | otherwise = (Just x, [x])
+        start = either (Left . (:)) (Right . (:))
+        
+        finish c f 
+            | null xs   = [] 
+            | otherwise = [c xs]
+            where xs = f []
+        
+        accum (Left  f) (Left  x) = (Left  (f . (x:)), [])
+        accum (Right f) (Right x) = (Right (f . (x:)), [])
+        accum        f         x  = (start x, either (finish Left) (finish Right) f)
 
-eqPackets (Packet _ _ a) (Packet _ _ b) = a == b
+packetize :: (Monad m, Ord a, Fractional a) => Enumeratee (Token a) (Packet a) m b
+packetize 
+     =  bits
+    =$= collectEithers
+    =$= EL.map (either parseOtherWaveform parsePacket)
+    where
+        parseOtherWaveform [t]
+            | inRange 25e-3 27e-3 (duration (pulseSamples t))
+                = AssocPulse t
+        parseOtherWaveform ts = InvalidWaveform (V.fromList ts)
+        
+        parsePacket chunk = case packBytes bs of
+            Nothing     -> InvalidPacket (summarizeTokens ts) (U.fromList bs)
+            Just bytes  -> Packet        (summarizeTokens ts) (U.fromList bytes)
+            where
+                (ts, bs) = unzip chunk
+                
+                packByte bits = do
+                    guard (length bits == 8)
+                    return (foldl (\x y -> 2 * x + y) 0 bits)
+                
+                packBytes [] = pure []
+                packBytes bits = (:)
+                    <$> packByte  byte
+                    <*> packBytes rest
+                    where
+                        (byte,rest) = splitAt 8 bits
+
+-}
+
+clusterByE :: Monad m => (a -> Bool) -> (a -> a -> Bool) -> Enumeratee a [a] m b
+clusterByE end eq = EL.concatMapAccum accum Nothing
+    where
+        accum Nothing x
+            | end x     = (Nothing,                     [[x]])
+            | otherwise = (Just (x, id),                [])
+        
+        accum (Just (prev, rest)) x
+            | end x     = (Nothing,                     [rest [prev, x]])
+            | eq prev x = (Just (x, rest . (prev :)),   [])
+            | otherwise = (Just (x, id),                [rest [prev]])
+
+clusterMessages :: (Ord a, Fractional a, Monad m) => Enumeratee (Packet a) (Int, Message a) m b
+clusterMessages 
+     =  EL.map interp
+    =$= clusterByE endMessage eqMessages
+    =$= EL.map summarize
+    where
+        endMessage (TemperatureReading t _ _ _ _ _) = idle t
+        endMessage UnknownMessage{}                 = True
+        
+        summarize ms@(TemperatureReading _ a b c d e:_) = 
+            ( length ms
+            , TemperatureReading (summarizeTokens ts) a b c d e
+            )
+            where ts = [ t | TemperatureReading t _ _ _ _ _ <- ms]
+        summarize ms = (length ms, last ms)
+
+
+eqPackets (Packet _ a) (Packet _ b) = a == b
 eqPackets a b = a == b
 
 eqMessages (TemperatureReading _ a0 b0 c0 d0 e0)
@@ -437,47 +427,24 @@ eqMessages (TemperatureReading _ a0 b0 c0 d0 e0)
      
 eqMessages a b = a == b
 
-snr :: (RealFloat a, Eq a, Monad m) => a -> Enumeratee (Complex a) (a, a) m b
-snr alpha = flip EL.concatMapAccum (Left (0, 0/0)) f
-    where
-        sut     = round (recip alpha)
-        
-        -- startup phase; eat a certain number of
-        -- initial samples to stabilize noise floor calculation
-        f (Left (n, nf)) x
-            | n < sut       = (Left (n+1, nf'), [ ])
-            | otherwise     = (Right nf',       [y])
-            where (!nf', y) = g nf x
-        f (Right nf) x     = (Right nf',        [y])
-            where (!nf', y) = g nf x
-        
-        g nf x = 
-            let p       = pow x
-                nf' | isInfinite nf
-                    || isNaN nf     = p
-                    | x == 0        = nf
-                    | otherwise     = lerp nf p alpha
-                
-             in (nf', (nf, p - nf))
-
 dump :: Show a => Iteratee a IO ()
 dump = EL.mapM_ print
 
-dumpIntervals :: (Fractional a, Ord a, Show a) => a -> Iteratee a IO ()
-dumpIntervals timeout = EL.mapM_ $ \dt ->
-    if dt >= samples timeout
-        then print dt
-        else putStr (show dt ++ " ")
+dumpTokens :: Iteratee (Token Float) IO ()
+dumpTokens = EL.mapM_ (putStrLn . pprToken)
 
-dumpTokens :: (Show a, Ord a) => Iteratee (Token a) IO ()
-dumpTokens = EL.mapM_ $ \t ->
-    case t of
-        Idle{}     -> putStrLn "" >> putStr "idle"
-        Pulse dt _ -> putStr (',' : show dt)
-        Delay dt _ -> putStr ('|' : show dt)
+pprToken :: Token Float -> String
+pprToken t = printf "pulse: %6.1fµs, %5.1fdB, %8.1fkHz, delay: %6.1fµs, %5.1fdB, %8.1fkHz%s"
+    (duration   (pulseSamples t) * 1e6  :: Float)
+    (sampleMean (pulseSamples t))
+    (sampleFreq (pulseSamples t) * 1e-3 :: Float)
+    (duration   (delaySamples t) * 1e6  :: Float)
+    (sampleMean (delaySamples t))
+    (sampleFreq (delaySamples t) * 1e-3 :: Float)
+    (if idle t then " (idle)" else "")
 
 data Message a
-    = TemperatureReading a !Word8 !Int16 !Int16 !Word8 !Word8
+    = TemperatureReading !(Token a) !Word8 !Int16 !Int16 !Word8 !Word8
     | UnknownMessage !(Packet a)
     deriving (Eq, Ord, Read, Show)
 
@@ -485,14 +452,14 @@ knownMessage UnknownMessage{}   = False
 knownMessage _                  = True
 
 messageSNR :: (Ord a, Num a) => Message a -> a
-messageSNR (TemperatureReading r _ _ _ _ _)    = r
+messageSNR (TemperatureReading t _ _ _ _ _)    = tokenSNR t
 messageSNR (UnknownMessage p)                  = packetSNR p
 
-interp :: Packet a -> Message a
-interp (Packet snr _ p)
-    | U.length p == 6   = TemperatureReading snr probe (s12 t0) (s12 t1) flags cksum
+interp :: (Ord a, Num a) => Packet a -> Message a
+interp (Packet t bs)
+    | U.length bs == 6  = TemperatureReading t probe (s12 t0) (s12 t1) flags cksum
         where
-            [a, b, c, d, e, f] = U.toList p
+            [a, b, c, d, e, f] = U.toList bs
             
             -- sign-extend 12 bits to 16 bits
             s12 :: Word16 -> Int16
@@ -522,24 +489,27 @@ pprTemp :: Int16 -> Bool -> String
 pprTemp x False = printf "-- no probe --"
 pprTemp x True  = printf "%5.1fºC/%5.1fºF" (degC x) (degF x)
 
-pprMessage :: (Show a, RealFrac a) => Message a -> [a] -> String
-pprMessage (UnknownMessage p) _ = show p
-pprMessage (TemperatureReading _snr p t0 t1 flags cksum) snr
-    = printf "probe 0x%2x: %s %s [flags: %02x, checksum: %s, SNR: %5.1fdB, count: %2d]"
+pprMessage :: Int -> Message Float -> String
+pprMessage _ (UnknownMessage p) = pprPacket p
+pprMessage count (TemperatureReading t p t0 t1 flags cksum)
+    = printf "probe 0x%2x: %s %s [flags: %02x, checksum: %s, SNR: %5.1fdB, freq: %8.3fMHz count: %2d]"
         p
         (pprTemp t0 (testBit flags 6))
         (pprTemp t1 (testBit flags 7))
         flags
         (if cksum == 0 then "OK" else printf "failed (%02x)" cksum)
-        (maximum (map realToFrac snr) :: Float)
-        (length snr)
+        (realToFrac (tokenSNR t) :: Float)
+        (1e-6 * (center + realToFrac (sampleFreq (pulseSamples t))) :: Float)
+        count
+    -- ++ " " ++ pprToken t
 
 -- supported gains for my particular device (unit: 0.1 dB):
 -- [0,9,14,27,37,77,87,125,144,157,166,197,207,229,254,280,297,328,338,364,372,386,402,421,434,439,445,480,496]
 gain        = Nothing
-threshold   = 15
-ping z      = db (magSq z) > threshold
-timeout     = 10e-3
+thresholdLo = 9
+thresholdHi = 13
+minPulse    = 50e-6
+maxDelay    = 10e-3
 
 main = do
     hSetBuffering stdout NoBuffering
@@ -549,20 +519,30 @@ main = do
         Just dev -> do
             RTLSDR.setSampleRate    dev (round sampling)
             RTLSDR.setCenterFreq    dev (round center)
+            RTLSDR.setOffsetTuning  dev False
             RTLSDR.setAGCMode       dev (isNothing gain)
             RTLSDR.setTunerGainMode dev (isJust gain)
             maybe (return False) (RTLSDR.setTunerGain dev) gain
             RTLSDR.resetBuffer dev
             
-            readFiltered dev 0 0
-                (  snr 3.5e-5 
-               =$= EL.map snd
-               =$= tokenize (> threshold) (round (samples timeout))
-               =$= debounce 5 3
+            readIter dev 0 0
+                (  EL.concatMap (map toC . ST.toList)
+               =$= dcReject (recip sampling)
+               =$= lfilter fir (U.fromList [1])
+               =$= tokenize 3.5e-5 thresholdLo thresholdHi (round (samples minPulse)) (round (samples maxDelay))
+               =$= EL.filter ((< 100e3) . abs . sampleFreq . pulseSamples)
                =$= packetize
-               =$= EL.filter validPacket
                =$= clusterMessages
-               =$= EL.filter (knownMessage . fst)
+               =$= EL.filter (knownMessage . snd)
                =$  EL.mapM_ (putStrLn . uncurry pprMessage)
                 )
+    putStrLn "exiting"
 
+fir :: U.Vector C
+fir = U.fromList
+    [ -0.05018194, -0.00856774,  0.00188394,  0.01599507,  0.0270292,   0.02820061
+    ,  0.01633312, -0.00594583, -0.02987481, -0.04321448, -0.03488799,  0.00037788
+    ,  0.05865464,  0.12703152,  0.1877356,   0.22327912,  0.22327912,  0.1877356
+    ,  0.12703152,  0.05865464,  0.00037788, -0.03488799, -0.04321448, -0.02987481
+    , -0.00594583,  0.01633312,  0.02820061,  0.0270292,   0.01599507,  0.00188394
+    , -0.00856774, -0.05018194]
