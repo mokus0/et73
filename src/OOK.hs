@@ -1,112 +1,104 @@
+{-# LANGUAGE DeriveFunctor #-}
 module OOK
-    ( magSq
-    , db
-      
-    , Token
-    , pulseSamples
-    , delaySamples
-    , idle
+    ( Token
+    , pulse
+    , delay
     , tokenSNR
-    , summarizeTokens
     , pprToken
     
-    , tokenize
+    , tokenizeBy
+    , tokenizeCount
+    , tokenizeSamples
     ) where
 
+import Control.Applicative
+import Data.Maybe
 import Data.Monoid
-import Data.Complex
 import Data.Enumerator ((=$=), Enumeratee)
 import qualified Data.Enumerator.List as EL
-import Data.Enumerator.Signal
-import Data.List
 import Samples
 import Text.Printf
 
-magSq :: Num a => Complex a -> a
-magSq (a :+ b) = a*a + b*b
+data Token a = Token {pulse :: !a, delay :: !a}
+    deriving (Eq, Ord, Read, Show, Functor)
 
-db :: Floating a => a -> a
-db z = (10 / log 10) * log z
+instance Monoid a => Monoid (Token a) where
+    mempty = Token mempty mempty
+    mappend (Token ps0 ds0) (Token ps1 ds1) = 
+        Token (mappend ps0 ps1) (mappend ds0 ds1)
 
-data Token a = Token {pulseSamples :: !(Samples a), delaySamples :: !(Samples a), idle :: !Bool}
-    deriving (Eq, Ord, Read, Show)
+tokenSNR :: Num a => Token (Samples a) -> a
+tokenSNR t = sampleMean (pulse t) - sampleMean (delay t)
 
-tokenSNR :: Num a => Token a -> a
-tokenSNR t = sampleMean (pulseSamples t) - sampleMean (delaySamples t)
+pprToken :: Float -> Token (Samples Float) -> String
+pprToken rate t = printf "pulse: %6.1fµs, %5.1fdB, %8.1fkHz, delay: %6.1fµs, %5.1fdB, %8.1fkHz"
+    (duration rate   (pulse t) * 1e6  :: Float)
+    (sampleMean (pulse t))
+    (sampleFreq rate (pulse t) * 1e-3 :: Float)
+    (duration rate   (delay t) * 1e6  :: Float)
+    (sampleMean (delay t))
+    (sampleFreq rate (delay t) * 1e-3 :: Float)
 
-summarizeTokens :: (Ord a, Fractional a) => [Token a] -> Token a
-summarizeTokens = foldl' f (Token mempty mempty False)
+data TokenizerState a
+    = Idle
+    | Pulse !a
+    | Delay !a !a
+
+{-# INLINE tokenizeBy #-}
+tokenizeBy :: (Monoid b, Monad m)
+     => (a -> b)                -- inject samples into token
+     -> (a -> Bool)             -- sample begins a pulse
+     -> (a -> Bool)             -- sample ends a pulse
+     -> (Token b -> Bool)       -- (possibly incomplete) token is too short and should be merged with next
+     -> (Token b -> Bool)       -- (possibly incomplete) token should cause transition to idle state
+     -> Enumeratee a (Maybe (Token b)) m t
+     
+tokenizeBy f pLo pHi pShort pIdle =
+        EL.concatMapAccum step Idle
+    =$= debounce pShort
     where
-        f (Token ps0 ds0 i0) (Token ps1 ds1 i1) = 
-            Token (mappend ps0 ps1) (mappend ds0 ds1) (i0 || i1)
-
-pprToken :: Float -> Token Float -> String
-pprToken rate t = printf "pulse: %6.1fµs, %5.1fdB, %8.1fkHz, delay: %6.1fµs, %5.1fdB, %8.1fkHz%s"
-    (duration rate   (pulseSamples t) * 1e6  :: Float)
-    (sampleMean (pulseSamples t))
-    (sampleFreq rate (pulseSamples t) * 1e-3 :: Float)
-    (duration rate   (delaySamples t) * 1e6  :: Float)
-    (sampleMean (delaySamples t))
-    (sampleFreq rate (delaySamples t) * 1e-3 :: Float)
-    (if idle t then " (idle)" else "")
-
-data TokenizerState = Pulse | Delay | Idle
-
--- for each sample, calculate signal-to-noise ratio (with
--- alpha as exponential filter parameter) and phase change
--- relative to previous sample
-{-# INLINE sampleize #-}
-sampleize alpha = EL.mapAccum nextSample (0/0, 0/0)
-    where
-        noiseFloor prev p
-            | isInfinite prev
-            || isNaN prev       = p
-            | otherwise         = lerp prev p alpha
+        step s@Idle x
+            | pHi x     = (Pulse (f x),                 [])
+            | otherwise = (s,                           [])
         
-        phaseChange z0 z1 = phase (z1 / z0)
+        step s@(Pulse ps) x
+            | pLo x     = (Pulse (mappend ps (f x)),    [])
+            | otherwise = (Delay ps (f x),              [])
         
-        nextSample (prevZ, prevNF) z = 
-            let p       = db (magSq z)
-                nf      = if z == 0
-                    then prevNF
-                    else noiseFloor prevNF p
-                
-             in ((z, nf), (p - prevNF, phaseChange prevZ z))
+        step s@(Delay ps ds) x
+            | pHi x     = (Pulse (f x),                 [Just s])
+            | pIdle s   = (Idle,                        [Just s, Nothing])
+            | otherwise = (Delay ps (mappend ds (f x)), [])
+            where s = Token ps ds
 
-{-# INLINE tokenize #-}
-tokenize :: (Monad m, Ord a, RealFloat a) => a -> a -> a -> Int -> Int -> Enumeratee (Complex a) (Token a) m b
-tokenize alpha thresholdLo thresholdHi minPulse maxDelay =
-        sampleize alpha
-    =$= EL.concatMapAccum f (Idle, mempty, mempty)
-    =$= debounce minPulse
-    where
-        f t@(Idle, ps, ds) ~(x, p)
-            | x > thresholdHi           = ((Pulse, sample x p, ds),         [])
-            | otherwise                 = (t,                               [])
-        
-        f t@(Delay, ps, ds) ~(x, p)
-            | x > thresholdHi           = ((Pulse, sample x p, mempty),     [Token ps ds False])
-            | nSamples ds > maxDelay    = ((Idle, mempty, mempty),          [Token ps ds True])
-            | otherwise                 = ((Delay, ps, addSample ds x p),   [])
-        
-        f t@(Pulse, ps, ds) ~(x, p)
-            | x > thresholdLo           = ((Pulse, addSample ps x p, ds),   [])
-            | otherwise                 = ((Delay, ps, sample x p),         [])
+{-# INLINE tokenizeSamples #-}
+tokenizeSamples :: (Monad m, Ord a, Fractional a) => a -> a -> Int -> Int -> Enumeratee (Samples a) (Maybe (Token (Samples a))) m b
+tokenizeSamples thresholdLo thresholdHi minPulse maxDelay =
+    tokenizeBy id
+        ((> thresholdLo) . sampleMean)
+        ((> thresholdHi) . sampleMean)
+        (\t -> nSamples (pulse t) + nSamples (delay t) <  minPulse)
+        ((>= maxDelay) . nSamples . delay)
+
+{-# INLINE tokenizeCount #-}
+tokenizeCount :: (Monad m, Ord a, RealFloat a) => a -> a -> Int -> Int -> Enumeratee a (Maybe (Token (Sum Int))) m b
+tokenizeCount thresholdLo thresholdHi minPulse maxDelay =
+    tokenizeBy (const (Sum 1))
+        (> thresholdLo)
+        (> thresholdHi)
+        (\t -> getSum (pulse t) + getSum (delay t) <  minPulse)
+        ((>= maxDelay) . getSum . delay)
 
 {-# INLINE debounce #-}
-debounce :: (Monad m, Ord a, Fractional a) => Int -> Enumeratee (Token a) (Token a) m b
-debounce minPulse = EL.concatMapAccum accum Nothing
+debounce :: (Monoid a, Monad m) => (Token a -> Bool) -> Enumeratee (Maybe (Token a)) (Maybe (Token a)) m b
+debounce pShort = EL.concatMapAccum accum Nothing
     where
-        short t = (nSamples (pulseSamples t) < minPulse)
+        extend (Token p1 d1) (Token p0 d0) =
+            Token (mconcat [p0, d0, p1]) d1
         
-        extend (Token p0 d0 i0) (Token p1 d1 i1) =
-            Token p0 (mconcat [d0, p1, d1]) (i0 || i1)
+        accum Nothing       Nothing = (Nothing, [])
+        accum (Just prev)   Nothing = (Nothing, [Just prev, Nothing])
         
-        accum Nothing t
-            | short t   = (Nothing, [])
-            | idle t    = (Nothing, [t])
-            | otherwise = (Just t, [])
-        accum (Just prev) t
-            | short t   = (Just (extend prev t), [])
-            | idle t    = (Nothing, [prev, t])
-            | otherwise = (Just t, [prev])
+        accum prev (Just t)
+            | pShort t  = (extend t <$> prev,   [])
+            | otherwise = (Just t,              [prev | isJust prev])

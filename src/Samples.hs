@@ -7,8 +7,14 @@ module Samples
     , sampleMean
     , duration
     , sampleFreq
+    
+    , toSamples
     )where
 
+import Data.Complex
+import Data.Enumerator (Enumeratee)
+import qualified Data.Enumerator.List as EL
+import Data.Enumerator.Signal
 import Data.Monoid
 
 updateMean n m x = m + (x - m) / fromIntegral n
@@ -42,4 +48,28 @@ addSample (Samples n0 x0 p0) x1 p1 = Samples n1 (updateMean n1 x0 x1) (updateMea
 
 duration   rate t = fromIntegral (nSamples t) / rate
 sampleFreq rate t = rate * freqMean t
+
+-- for each sample, calculate signal-to-noise ratio (with
+-- alpha as exponential filter parameter) and phase change
+-- relative to previous sample
+{-# INLINE toSamples #-}
+toSamples :: (Monad m, RealFloat a) => a -> Enumeratee (Complex a) (Samples a) m b
+toSamples alpha = EL.mapAccum nextSample (0/0, 0/0)
+    where
+        noiseFloor prev p
+            | isInfinite prev
+            || isNaN prev       = p
+            | otherwise         = lerp prev p alpha
+        
+        -- phaseChange z0 z1 = phase (z1 / z0)
+        phaseChange (a :+ b) (c :+ d)
+            = atan2 (b * c - a * d) (a * c + b * d)
+        
+        nextSample (prevZ, prevNF) z = 
+            let p       = db (magSq z)
+                nf      = if z == 0
+                    then prevNF
+                    else noiseFloor prevNF p
+                
+             in ((z, nf), (sample (p - prevNF) (phaseChange prevZ z)))
 

@@ -18,7 +18,9 @@ import qualified Data.Enumerator.List as EL
 import Data.Enumerator.RTLSDR
 import Data.Enumerator.Signal
 import Data.Int
+import qualified Data.IntMap as I
 import Data.Maybe
+import Data.Monoid
 import Data.Time
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as U
@@ -27,6 +29,7 @@ import OOK
 import qualified RTLSDR
 import Samples
 import System.IO
+import System.Locale
 import Text.Printf
 
 center, sampling :: Num a => a
@@ -37,10 +40,11 @@ samples :: Num a => a -> a
 samples sec = sec * sampling
 
 data Packet a
-    = AssocPulse      !(Token a)
-    | Packet          !(Token a) !(U.Vector Word8)
-    | InvalidPacket   !(Token a) !(U.Vector Word8)
-    | InvalidWaveform  !(V.Vector (Token a))
+    = AssocPulse        !(Token a)
+    | PacketDelimiter   !(Token a)
+    | Packet            !(Token a) !(U.Vector Word8)
+    | InvalidPacket     !(Token a) !(U.Vector Word8)
+    | InvalidWaveform   !(V.Vector (Token a))
     deriving (Eq, Ord, Read, Show)
 
 pprPacket (AssocPulse t) = "AssocPulse: " ++ pprToken sampling t
@@ -63,33 +67,35 @@ packetSNR (Packet        t _)   = tokenSNR t
 packetSNR (InvalidPacket t _)   = tokenSNR t
 packetSNR (InvalidWaveform v)   = V.maximum (V.map tokenSNR v)
 
-packetize :: (Monad m, Ord a, Fractional a) => Enumeratee (Token a) (Packet a) m b
-packetize = EL.concatMapAccum f id
+packetize :: (Monoid a, Ord b, Monad m, Fractional b) =>
+     (a -> b) -> Enumeratee (Maybe (Token a)) (Maybe (Packet a)) m t
+packetize f = EL.concatMapAccum accum id
     where
         inRange t0 t1 x = t0 <= x && x <= t1
         
-        packDelim t = idle t || inRange 2.8e-3 4.5e-3 (duration sampling (delaySamples t))
+        packDelim t = f (delay t) >= 3.5e-3
         
-        f p t
-            | packDelim t   = (id,       [parsePacket t (p [])])
+        accum p Nothing     = case p [] of
+            []      -> (id,         [Nothing])
+            tokens  -> (id,         [Just (parsePacket Nothing tokens), Nothing])
+        accum p (Just t)
+            | packDelim t   = (id,       [Just (parsePacket (Just t) (p []))])
             | otherwise     = (p . (t:), [])
         
-        parsePacket endToken tokens = 
-            case validBits of
+        parsePacket mbEndToken tokens = 
+            case mapM validBit tokens of
                 Just bs@(_:_) -> maybe
                     (InvalidPacket ts  (U.fromList bs))
                     (Packet        ts . U.fromList)
                     (packBytes bs)
-                _       -> InvalidWaveform (V.fromList tokens `V.snoc` endToken)
+                _       -> InvalidWaveform (maybe id (flip V.snoc) mbEndToken (V.fromList tokens))
              where
-                ts          = summarizeTokens (endToken : tokens)
-                
-                validBits   = mapM validBit tokens
+                ts          = mconcat tokens
                 
                 validBit t
-                    | inRange 0.8e-3 1.2e-3 (duration sampling (delaySamples t)) = Just 0
-                    | inRange 1.8e-3 2.2e-3 (duration sampling (delaySamples t)) = Just 1
-                    | otherwise             = Nothing
+                    | inRange 0.8e-3 1.2e-3 (f (delay t))   = Just 0
+                    | inRange 1.8e-3 2.2e-3 (f (delay t))   = Just 1
+                    | otherwise                             = Nothing
                 
                 packByte bits = do
                     guard (length bits == 8)
@@ -114,57 +120,67 @@ clusterByE end eq = EL.concatMapAccum accum Nothing
             | eq prev x = (Just (x, rest . (prev :)),   [])
             | otherwise = (Just (x, id),                [rest [prev]])
 
-clusterMessages :: (Ord a, Fractional a, Monad m) => Enumeratee (Packet a) (Int, Message a) m b
+clusterMessages :: (Ord a, Fractional a, Monad m) => Enumeratee (Maybe (Packet (Samples a))) (Int, Maybe (Message (Samples a))) m b
 clusterMessages 
-     =  EL.map interp
-    =$= clusterByE endMessage eqMessages
-    =$= EL.map summarize
+     =  EL.map (fmap interp)
+    =$= clusterByE isNothing eq
+    =$= EL.concatMap summarize
     where
-        endMessage (TemperatureReading t _ _ _ _ _) = idle t
-        endMessage UnknownMessage{}                 = True
+        eq (Just (TempMessage _ m0)) (Just (TempMessage _ m1)) = m0 == m1
+        eq a b = a == b
         
-        summarize ms@(TemperatureReading _ a b c d e:_) = 
-            ( length ms
-            , TemperatureReading (summarizeTokens ts) a b c d e
-            )
-            where ts = [ t | TemperatureReading t _ _ _ _ _ <- ms]
-        summarize ms = (length ms, last ms)
+        summarize ms@(Just (TempMessage _ m) : _) = 
+            [ ( length ms
+              , Just (TempMessage (mconcat ts) m)
+              )
+            ]
+            where ts = [ t | Just (TempMessage t _) <- ms]
+        summarize ms = [(1, m) | m <- ms]
 
+temperatureReadings :: Monad m => Enumeratee (Message a) TemperatureReading m b
+temperatureReadings = EL.concatMap proj
+    where
+        proj (TempMessage _ m)  = [m]
+        proj _                  = []
 
-eqPackets (Packet _ a) (Packet _ b) = a == b
-eqPackets a b = a == b
-
-eqMessages (TemperatureReading _ a0 b0 c0 d0 e0)
-           (TemperatureReading _ a1 b1 c1 d1 e1) =
-        a0 == a1
-     && b0 == b1
-     && c0 == c1
-     && d0 == d1
-     && e0 == e1
-     
-eqMessages a b = a == b
+processMessages :: Monad m => Enumeratee TemperatureReading TemperatureReading m b
+processMessages = EL.concatMapAccum onMessage I.empty
+    where
+        onMessage ms m = (ms', [m | mbOld /= Just m])
+            where
+                insertLookup = I.insertLookupWithKey (\_key new _old -> new)
+                (mbOld, ms') = insertLookup (fromIntegral (probeID m)) m ms
 
 dump :: Show a => Iteratee a IO ()
 dump = EL.mapM_ print
 
-dumpTokens :: Iteratee (Token Float) IO ()
+dumpTokens :: Iteratee (Token (Samples Float)) IO ()
 dumpTokens = EL.mapM_ (putStrLn . pprToken sampling)
 
+data TemperatureReading = TemperatureReading
+    { probeID   :: !Word8
+    , temp1     :: !Int16
+    , temp2     :: !Int16
+    , flags     :: !Word8
+    , cksum     :: !Word8
+    }
+    deriving (Eq, Ord, Read, Show)
+
 data Message a
-    = TemperatureReading !(Token a) !Word8 !Int16 !Int16 !Word8 !Word8
+    = TempMessage !(Token a) !TemperatureReading
     | UnknownMessage !(Packet a)
     deriving (Eq, Ord, Read, Show)
 
 knownMessage UnknownMessage{}   = False
 knownMessage _                  = True
 
-messageSNR :: (Ord a, Num a) => Message a -> a
-messageSNR (TemperatureReading t _ _ _ _ _)    = tokenSNR t
-messageSNR (UnknownMessage p)                  = packetSNR p
+messageSNR :: (Ord a, Num a) => Message (Samples a) -> a
+messageSNR (TempMessage t _)    = tokenSNR t
+messageSNR (UnknownMessage p)   = packetSNR p
 
-interp :: (Ord a, Num a) => Packet a -> Message a
+interp :: Packet a -> Message a
 interp (Packet t bs)
-    | U.length bs == 6  = TemperatureReading t probe (s12 t0) (s12 t1) flags cksum
+    | U.length bs == 6  = TempMessage t (TemperatureReading probe (s12 t0) (s12 t1) flags cksum)
         where
             [a, b, c, d, e, f] = U.toList bs
             
@@ -196,31 +212,38 @@ pprTemp :: Int16 -> Bool -> String
 pprTemp x False = printf "-- no probe --"
 pprTemp x True  = printf "%5.1fºC/%5.1fºF" (degC x) (degF x)
 
-pprMessage :: Int -> Message Float -> String
-pprMessage _ (UnknownMessage p) = pprPacket p
-pprMessage count (TemperatureReading t p t0 t1 flags cksum)
-    = printf "probe 0x%2x: %s %s [flags: %02x, checksum: %s, SNR: %5.1fdB, freq: %8.3fMHz count: %2d]"
+pprTemperatureReading :: TemperatureReading -> String
+pprTemperatureReading (TemperatureReading p t0 t1 flags cksum)
+    = printf "probe 0x%2x: %s %s [flags: %02x, checksum: %s]"
         p
         (pprTemp t0 (testBit flags 6))
         (pprTemp t1 (testBit flags 7))
         flags
         (if cksum == 0 then "OK" else printf "failed (%02x)" cksum)
+
+
+pprMessage :: Int -> Message (Samples Float) -> String
+pprMessage _ (UnknownMessage p) = pprPacket p
+pprMessage count (TempMessage t m)
+    = printf "%s [SNR: %5.1fdB, freq: %8.3fMHz count: %2d]"
+        (pprTemperatureReading m)
         (realToFrac (tokenSNR t) :: Float)
-        (1e-6 * (center + realToFrac (sampleFreq sampling (pulseSamples t))) :: Float)
+        (1e-6 * (center + realToFrac (sampleFreq sampling (pulse t))) :: Float)
         count
     -- ++ " " ++ pprToken sampling t
 
 printTimeStamped str = do
     now <- getCurrentTime
-    putStrLn $ unwords ["[" ++ show now ++ "]", str]
+    putStrLn $ unwords ["[" ++ formatTime defaultTimeLocale "%F %T %Z" now ++ "]", str]
 
 -- supported gains for my particular device (unit: 0.1 dB):
 -- [0,9,14,27,37,77,87,125,144,157,166,197,207,229,254,280,297,328,338,364,372,386,402,421,434,439,445,480,496]
-gain        = Nothing
-thresholdLo = 9
-thresholdHi = 13
+gain        = Just 297
+thresholdLo = 10
+thresholdHi = 14
 minPulse    = 50e-6
-maxDelay    = 500e-3
+maxDelay    = 100e-3
+alpha       = 3.5e-5
 
 main = do
     hSetBuffering stdout NoBuffering
@@ -238,13 +261,28 @@ main = do
             
             readIter dev 0 0
                 (  EL.concatMap U.toList
+               =$= runFIR fir
                =$= dcReject (recip sampling)
-               =$= lfilter fir (U.fromList [1])
-               =$= tokenize 3.5e-5 thresholdLo thresholdHi (round (samples minPulse)) (round (samples maxDelay))
-               =$= packetize
-               =$= clusterMessages
-               =$= EL.filter (knownMessage . snd)
-               =$= EL.map (uncurry pprMessage)
+               
+               -- =$= toSamples alpha
+               -- =$= tokenizeSamples thresholdLo thresholdHi (round (samples minPulse)) (round (samples maxDelay))
+               -- -- =$= EL.map (maybe "" (pprToken sampling))
+               -- =$= packetize (duration sampling)
+               -- =$= EL.map (maybe "" pprPacket)
+               -- -- =$= clusterMessages
+               -- -- =$= EL.concatMap (\(n, mbM) -> case mbM of {Nothing -> []; Just m -> [(n, m)]})
+               -- -- =$= EL.filter (knownMessage . snd)
+               -- -- =$= EL.map (uncurry pprMessage)
+               
+               =$= snr alpha
+               =$= tokenizeCount thresholdLo thresholdHi (round (samples minPulse)) (round (samples maxDelay))
+               =$= packetize ((/ sampling) . fromIntegral . getSum)
+               =$= EL.map (fmap interp)
+               =$= EL.concatMap (maybe [] (:[]))
+               =$= temperatureReadings
+               =$= processMessages
+               =$= EL.map pprTemperatureReading
+               
                =$  EL.mapM_ printTimeStamped
                 )
     putStrLn "exiting"

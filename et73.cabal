@@ -17,9 +17,11 @@ description:            I'm too lame to describe my project
 Executable et73
   hs-source-dirs:       src
   main-is:              ET73.hs
-  ghc-options:          -fwarn-unused-imports -fwarn-unused-binds -O2
+  ghc-options:          -fwarn-unused-imports -fwarn-unused-binds -O2 -funbox-strict-fields
   build-depends:        base >= 3,
+                        containers,
                         enumerator,
+                        old-locale,
                         mtl,
                         rtlsdr,
                         time,

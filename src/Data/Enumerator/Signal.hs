@@ -1,6 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 module Data.Enumerator.Signal where
 
+import Data.Complex
 import Data.Enumerator (Enumeratee)
 import qualified Data.Enumerator.List as EL
 import qualified Data.Vector.Unboxed as U
@@ -58,6 +59,26 @@ lfilter b' a' = flip EL.mapAccum (U.replicate (n-1) 0) $ \(!z) (!x) ->
         {-# NOINLINE b_t #-}
         b_t = U.tail (pad b')
 
+-- runFIR b === lfilter b (U.singleton 1)
+{-# INLINE runFIR #-}
+runFIR :: (Fractional t, U.Unbox t, Monad m) => U.Vector t -> Enumeratee t t m b
+runFIR b = flip EL.mapAccum (U.replicate (n-1) 0) $ \(!z) (!x) ->
+    let z_0 = U.head z
+        z_t = U.tail z `U.snoc` 0
+        
+        !y  = b_0 * x + z_0
+        
+        updateZ !b !z = b * x + z
+     in (U.zipWith updateZ b_t z_t, y)
+    where
+        n = U.length b
+        
+        {-# NOINLINE b_0 #-}
+        b_0 = U.head b
+        
+        {-# NOINLINE b_t #-}
+        b_t = U.tail b
+
 -- discard out all but one of every 'n' samples
 {-# INLINE decimate #-}
 decimate :: Monad m => Int -> Enumeratee a a m b
@@ -75,4 +96,31 @@ dcReject :: (Fractional a, Monad m) => a -> Enumeratee a a m b
 dcReject !alpha = EL.mapAccum f 0
     where
         f !dc !x = (lerp dc x alpha, x - dc)
+
+{-# INLINE magSq #-}
+magSq :: Num a => Complex a -> a
+magSq (a :+ b) = a*a + b*b
+
+{-# INLINE db #-}
+db :: Floating a => a -> a
+db z = 4.3429448190325175 * log z
+
+-- for each sample, calculate signal-to-noise ratio (with
+-- alpha as exponential filter parameter){-# INLINE snr #-}
+{-# INLINE snr #-}
+snr :: (Monad m, RealFloat a) => a -> Enumeratee (Complex a) a m b
+snr alpha = EL.mapAccum nextSample (0/0)
+    where
+        noiseFloor prev p
+            | isInfinite prev
+            || isNaN prev       = p
+            | otherwise         = lerp prev p alpha
+        
+        nextSample prevNF z = 
+            let p       = db (magSq z)
+                nf      = if z == 0
+                    then prevNF
+                    else noiseFloor prevNF p
+                
+             in (nf, p - prevNF)
 
